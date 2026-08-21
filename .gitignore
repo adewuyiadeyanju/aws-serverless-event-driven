@@ -28,3 +28,7 @@ Thumbs.db
 # Lambda build artifacts
 application/build/
 terraform/*.zip
+
+# Lambda local test artifacts
+terraform/lambda-test.json
+terraform/lambda-response.json
