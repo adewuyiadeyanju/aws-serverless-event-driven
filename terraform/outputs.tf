@@ -12,3 +12,8 @@ output "dynamodb_table_name" {
   description = "Operational events DynamoDB table name"
   value       = aws_dynamodb_table.operational_events.name
 }
+
+output "api_endpoint" {
+  description = "HTTP API endpoint"
+  value       = aws_apigatewayv2_api.operational_events.api_endpoint
+}
