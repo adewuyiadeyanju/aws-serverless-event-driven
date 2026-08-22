@@ -186,7 +186,7 @@ The implementation was validated progressively from application logic through th
 The application test suite was executed using:
 
 ```powershell
-python -m pytest application	ests
+python -m pytest application/tests
 ```
 
 Result:
