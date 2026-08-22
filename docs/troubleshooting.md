@@ -1,512 +1,246 @@
 # Troubleshooting Guide
 
-## Overview
+## Diagnostic Path
 
-This guide covers the issues encountered while developing and deploying the AWS serverless event-driven application.
-
-Use the event path to locate the first failed stage:
-
-```text
-Client
-  ↓
-API Gateway
-  ↓
-Operational Lambda
-  ↓
-DynamoDB
-  ↓
-DynamoDB Stream
-  ↓
-Stream Processor Lambda
-  ↓
-CloudWatch Logs
+``` text
+Client → API Gateway → Ingestion Lambda → DynamoDB
+                                      ↓
+                               DynamoDB Stream
+                                      ↓
+                              Stream Processor
+                                 ↓        ↓
+                               SNS     CloudWatch
+                                 ↓
+                                SQS
 ```
 
-The troubleshooting principle is simple:
+Always find the first failed layer before changing downstream
+components.
 
-> Find the first point where the expected behavior stops, then diagnose that layer before changing downstream components.
+## 1. Pydantic Import Error
 
----
+### Symptom
 
-# 1. Lambda Import Error: `No module named 'pydantic'`
-
-## Symptom
-
-Lambda returns:
-
-```json
-{
-  "errorMessage": "Unable to import module 'handler': No module named 'pydantic'"
-}
+``` text
+No module named 'pydantic'
 ```
 
-## Cause
+### Cause
 
-The local virtual environment contains Pydantic, but the Lambda deployment package does not.
+Pydantic is present locally but missing from the Lambda package.
 
-## Resolution
+### Fix
 
-Verify the deployment build:
+Rebuild `application/build` with dependencies and redeploy.
 
-```powershell
-Get-ChildItem application/build
-```
+## 2. `pydantic_core._pydantic_core` Import Error
 
-It should contain packages such as:
+### Cause
 
-```text
-pydantic/
-pydantic_core/
-boto3/
-```
+`pydantic_core` contains native code. A Windows-built dependency may not
+be compatible with Lambda's Linux runtime.
 
-Rebuild the Lambda package and redeploy:
+This was an actual issue encountered during deployment.
 
-```powershell
-terraform plan
-terraform apply
-```
+### Principle
 
-Then invoke Lambda again.
-
----
-
-# 2. Lambda Import Error: `No module named 'pydantic_core._pydantic_core'`
-
-## Symptom
-
-Lambda reports:
-
-```text
-No module named 'pydantic_core._pydantic_core'
-```
-
-## Cause
-
-`pydantic_core` contains compiled/native components.
-
-A dependency installed on Windows can be incompatible with the Linux environment used by AWS Lambda.
-
-This was an actual deployment issue encountered during this project.
-
-## Key Principle
-
-```text
+``` text
 Development OS != Lambda execution OS
 ```
 
-## Resolution
+Build dependencies using WSL/Linux, Docker, or a Lambda-compatible build
+environment.
 
-Build dependencies in an environment compatible with the Lambda runtime, for example:
+## 3. Lambda `FunctionError: Unhandled`
 
-- Linux/WSL
-- Docker
-- A Lambda-compatible build image
-
-Then regenerate:
-
-```text
-application/build/
-```
-
-and redeploy.
-
-Do not assume that a package working inside `.venv` will work inside Lambda.
-
----
-
-# 3. Lambda Invocation Shows `FunctionError: Unhandled`
-
-## Symptom
-
-AWS CLI returns:
-
-```json
-{
-    "StatusCode": 200,
-    "FunctionError": "Unhandled"
-}
-```
-
-## Important
-
-`StatusCode: 200` from `aws lambda invoke` does not mean the Lambda function completed successfully.
+`aws lambda invoke` may show HTTP status 200 while the function itself
+failed.
 
 Inspect:
 
-```powershell
+``` powershell
 Get-Content lambda-response.json
 ```
 
-Look for:
+Then:
 
-```text
-errorMessage
-errorType
-stackTrace
-```
-
-Also inspect CloudWatch:
-
-```powershell
+``` powershell
 aws logs tail `
   "/aws/lambda/fieldops-serverless-dev-event-handler" `
   --region eu-west-1 `
   --since 10m
 ```
 
----
+Look for `errorMessage`, `errorType`, and `stackTrace`.
 
-# 4. API Gateway Returns HTTP 400
+## 4. API HTTP 400
 
-## Symptom
+Check the Pydantic contract.
 
-The API returns:
+Required:
 
-```text
-HTTP/1.1 400 Bad Request
-```
-
-Inspect the response body.
-
-For example:
-
-```text
-1 validation error for OperationalEvent
-site_id
-Field required
-```
-
-## Cause
-
-The request does not satisfy the Pydantic `OperationalEvent` model.
-
-Required fields:
-
-```text
+``` text
 site_id
 event_type
 severity
 message
 ```
 
-## Valid Example
+Severity:
 
-```json
-{
-  "event_type": "equipment_alert",
-  "site_id": "RIG-003",
-  "severity": "medium",
-  "message": "Equipment telemetry alert detected"
-}
+``` text
+low
+medium
+high
+critical
 ```
 
----
+## 5. PowerShell JSON Problems
 
-# 5. PowerShell `curl.exe` JSON Quoting Errors
+Prefer `Invoke-RestMethod` with `ConvertTo-Json`:
 
-## Symptom
-
-A request can produce:
-
-```text
-Expecting property name enclosed in double quotes
-```
-
-and additional `curl` URL/host parsing errors.
-
-## Cause
-
-PowerShell quoting and escaping can interact unexpectedly with `curl.exe`.
-
-## Recommended Approach
-
-For PowerShell API testing, the most reliable option is usually:
-
-```powershell
+``` powershell
 $body = @{
-    event_type = "equipment_alert"
-    site_id    = "RIG-003"
-    severity   = "medium"
-    message    = "Equipment telemetry alert detected"
+    site_id    = "RIG-006"
+    event_type = "connectivity_degradation"
+    severity   = "high"
+    message    = "LEO connectivity latency exceeded operational threshold"
 } | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Uri "https://57gu5fmekc.execute-api.eu-west-1.amazonaws.com/events" `
-  -Method POST `
-  -ContentType "application/json" `
-  -Body $body
 ```
 
----
+Then submit with `Invoke-RestMethod`.
 
-# 6. API Gateway Reports `Unexpected UTF-8 BOM`
+## 6. DynamoDB Is Empty
 
-## Symptom
+Check:
 
-The API returns:
-
-```text
-Unexpected UTF-8 BOM (decode using utf-8-sig)
-```
-
-## Cause
-
-The request file begins with a UTF-8 byte-order mark.
-
-The BOM bytes are:
-
-```text
-EF BB BF
-```
-
-## Diagnosis
-
-```powershell
-Format-Hex .\curl-test.json | Select-Object -First 2
-```
-
-If the first bytes are:
-
-```text
-EF BB BF
-```
-
-the file contains a BOM.
-
-## Resolution
-
-Generate the file as UTF-8 without BOM.
-
-A reliable Windows approach is to use Python:
-
-```powershell
-@"
-from pathlib import Path
-
-payload = '{"event_type":"equipment_alert","site_id":"RIG-003","severity":"medium","message":"Equipment telemetry alert detected"}'
-
-Path("curl-test.json").write_text(payload, encoding="utf-8")
-"@ | Set-Content create_test_payload.py
-```
-
-Run:
-
-```powershell
-python create_test_payload.py
-```
-
-Verify:
-
-```powershell
-Format-Hex .\curl-test.json | Select-Object -First 2
-```
-
-The first byte should be:
-
-```text
-7B
-```
-
-which represents `{`.
-
-Then:
-
-```powershell
-curl.exe -i `
-  -X POST `
-  "https://57gu5fmekc.execute-api.eu-west-1.amazonaws.com/events" `
-  -H "Content-Type: application/json" `
-  --data-binary "@curl-test.json"
-```
-
-Expected:
-
-```text
-HTTP/1.1 201 Created
-```
-
-Temporary test files such as `curl-test.json` and `create_test_payload.py` should normally be removed after testing or added to `.gitignore` if they are intentionally retained as local tooling.
-
----
-
-# 7. API Works but DynamoDB Does Not Contain the Event
-
-## Diagnosis
-
-First verify the API response.
-
-Then:
-
-```powershell
+``` powershell
 aws dynamodb scan `
-  --table-name fieldops-serverless-dev-events `
+  --table-name "$(terraform output -raw dynamodb_table_name)" `
   --region eu-west-1
-```
-
-If the API returns `201 Created` but the item is missing, investigate:
-
-1. Operational Lambda logs.
-2. Lambda IAM permissions.
-3. `EVENT_TABLE_NAME` environment variable.
-4. DynamoDB table name.
-5. Lambda execution role.
-
-The ingestion Lambda requires:
-
-```text
-dynamodb:PutItem
-```
-
-against the operational events table.
-
----
-
-# 8. DynamoDB Stream Is Not Processing Events
-
-## Diagnosis
-
-Confirm Streams:
-
-```powershell
-aws dynamodb describe-table `
-  --table-name fieldops-serverless-dev-events `
-  --region eu-west-1 `
-  --query "Table.StreamSpecification"
-```
-
-Expected:
-
-```json
-{
-    "StreamEnabled": true,
-    "StreamViewType": "NEW_AND_OLD_IMAGES"
-}
 ```
 
 Then inspect:
 
-```powershell
-aws logs tail `
-  "/aws/lambda/fieldops-serverless-dev-stream-processor" `
-  --region eu-west-1 `
-  --since 5m
-```
+1.  Ingestion Lambda logs
+2.  `EVENT_TABLE_NAME`
+3.  IAM `dynamodb:PutItem`
+4.  Table name
+5.  Lambda execution role
 
-Expected:
-
-```text
-Stream processor started
-Processing DynamoDB Stream event: INSERT
-New operational event
-Stream processor completed
-```
-
----
-
-# 9. Stream Processor Lambda Exists but Receives No Records
+## 7. DynamoDB Stream Not Processing
 
 Check:
 
-### A. DynamoDB Stream
-
-```powershell
+``` powershell
 aws dynamodb describe-table `
-  --table-name fieldops-serverless-dev-events `
+  --table-name "$(terraform output -raw dynamodb_table_name)" `
   --region eu-west-1 `
   --query "Table.StreamSpecification"
 ```
 
-### B. Recent table activity
+Expected:
 
-```powershell
-aws dynamodb scan `
-  --table-name fieldops-serverless-dev-events `
-  --region eu-west-1
+``` text
+StreamEnabled = true
+StreamViewType = NEW_AND_OLD_IMAGES
 ```
 
-### C. Stream processor logs
+Then inspect the stream processor logs.
 
-```powershell
+## 8. High/Critical Event Not Published to SNS
+
+Check stream processor logs:
+
+``` powershell
 aws logs tail `
   "/aws/lambda/fieldops-serverless-dev-stream-processor" `
   --region eu-west-1 `
   --since 10m
 ```
 
-### D. Terraform configuration
+Verify:
 
-Check that the event source mapping references the correct:
+-   `SNS_TOPIC_ARN`
+-   SNS topic exists
+-   Stream processor IAM has `sns:Publish`
 
-- Stream ARN.
-- Stream processor Lambda.
-- Starting position.
-- Enabled state.
+Current behavior:
 
----
-
-# 10. Terraform Duplicate Resource Error
-
-## Symptom
-
-Terraform reports:
-
-```text
-Error: Duplicate resource "aws_iam_role" configuration
+``` text
+high     → SNS
+critical → SNS
+medium   → no priority notification
+low      → no priority notification
 ```
 
-## Cause
+## 9. SNS Has No SQS Subscription
 
-Terraform treats all `.tf` files in a module as one configuration namespace.
+Run:
 
-For example, the following cannot be declared twice:
-
-```hcl
-resource "aws_iam_role" "stream_processor" {
-}
+``` powershell
+aws sns list-subscriptions-by-topic `
+  --topic-arn "$(terraform output -raw sns_topic_arn)" `
+  --region eu-west-1
 ```
 
-even if the declarations are in different files.
+Expected:
 
-## Resolution
-
-Search the Terraform directory for duplicate resource names and keep a single definition.
-
-This issue occurred during the development of the stream processor and was resolved by consolidating the IAM definitions.
-
----
-
-# 11. Lambda Package Changes Are Not Reflected
-
-Terraform uses:
-
-```hcl
-source_code_hash = data.archive_file.lambda_package.output_base64sha256
+``` text
+Protocol: sqs
 ```
 
-If application source changes but `application/build` is not rebuilt, Terraform may package stale code.
+## 10. SNS Published but SQS Is Empty
+
+Run:
+
+``` powershell
+aws sqs receive-message `
+  --queue-url "$(terraform output -raw sqs_queue_url)" `
+  --region eu-west-1 `
+  --max-number-of-messages 10 `
+  --wait-time-seconds 5
+```
 
 Check:
 
-```powershell
+-   SNS subscription
+-   SQS queue policy
+-   Topic ARN
+-   Queue URL
+-   Whether a message has already been consumed
+-   Visibility timeout
+
+## 11. Terraform Duplicate Resource
+
+All `.tf` files in a directory share one Terraform module namespace.
+
+Do not define the same resource address twice, even in different files.
+
+## 12. Lambda Package Changes Not Reflected
+
+If source changes but `application/build` is not rebuilt, Terraform may
+package stale code.
+
+Check:
+
+``` powershell
 Get-ChildItem application/build
 ```
 
-Then rebuild the deployment package and run:
+Then rebuild and run:
 
-```powershell
+``` powershell
 terraform plan
 ```
 
-A changed deployment package should result in an updated source hash and Lambda update.
+A changed package should produce a changed Lambda source hash.
 
----
+## 13. CloudWatch Logs
 
-# 12. CloudWatch Logs
+Ingestion Lambda:
 
-Operational Lambda:
-
-```powershell
+``` powershell
 aws logs tail `
   "/aws/lambda/fieldops-serverless-dev-event-handler" `
   --region eu-west-1 `
@@ -515,101 +249,23 @@ aws logs tail `
 
 Stream processor:
 
-```powershell
+``` powershell
 aws logs tail `
   "/aws/lambda/fieldops-serverless-dev-stream-processor" `
   --region eu-west-1 `
   --since 10m
 ```
 
-CloudWatch Logs are the primary runtime diagnostic source for this baseline.
+## Lessons Learned
 
----
-
-# 13. End-to-End Diagnostic Procedure
-
-When the complete system appears not to work, validate each layer in order.
-
-## Step 1 — API Gateway
-
-Send a valid request.
-
-Expected:
-
-```text
-HTTP 201 Created
-```
-
-## Step 2 — Operational Lambda
-
-Check CloudWatch.
-
-Expected:
-
-```text
-Successful invocation
-```
-
-## Step 3 — DynamoDB
-
-Run:
-
-```powershell
-aws dynamodb scan `
-  --table-name fieldops-serverless-dev-events `
-  --region eu-west-1
-```
-
-Expected:
-
-```text
-New event exists
-```
-
-## Step 4 — DynamoDB Stream
-
-Confirm:
-
-```text
-StreamEnabled = true
-```
-
-## Step 5 — Stream Processor
-
-Inspect:
-
-```powershell
-aws logs tail `
-  "/aws/lambda/fieldops-serverless-dev-stream-processor" `
-  --region eu-west-1 `
-  --since 5m
-```
-
-Expected:
-
-```text
-Records received: 1
-Processing DynamoDB Stream event: INSERT
-Processed records: 1
-```
-
-This establishes a clear troubleshooting boundary between the synchronous ingestion path and asynchronous processing path.
-
----
-
-# Lessons Learned
-
-The implementation produced several practical cloud-engineering lessons:
-
-1. Dependencies must be packaged for the target Lambda runtime, not merely the local development OS.
-2. Input validation should happen before persistence.
-3. Windows PowerShell can introduce JSON quoting and encoding problems.
-4. Terraform resources share a module namespace across all `.tf` files.
-5. DynamoDB Streams provide a decoupled asynchronous processing mechanism.
-6. CloudWatch Logs are essential for serverless runtime diagnosis.
-7. `terraform plan` should be reviewed before `terraform apply`.
-8. Deployment artifacts should be separated from source-controlled application code.
-9. A successful API response does not by itself prove downstream event processing.
-10. End-to-end validation must verify persistence and asynchronous processing separately.
-
-These lessons are intentionally retained as part of the portfolio because they demonstrate practical implementation and troubleshooting experience, not only theoretical architecture.
+1.  Native dependencies must be built for the Lambda runtime.
+2.  Validate before persistence.
+3.  PowerShell can introduce JSON quoting issues.
+4.  Terraform has one module namespace.
+5.  DynamoDB Streams provide a natural asynchronous boundary.
+6.  SNS/SQS provide durable downstream decoupling.
+7.  CloudWatch is essential for serverless diagnosis.
+8.  `terraform plan` must be reviewed before `apply`.
+9.  API success does not prove downstream success.
+10. End-to-end validation must verify persistence and asynchronous
+    delivery independently.

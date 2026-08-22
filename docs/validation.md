@@ -2,302 +2,283 @@
 
 ## Objective
 
-This document records the validation evidence for the deployed AWS Serverless Event-Driven Operational Events Platform.
+The final objective was to demonstrate the complete deployed
+event-driven path:
 
-The goal is to demonstrate the complete baseline path:
-
-```text
+``` text
 API Gateway
-    ↓
+ ↓
 Ingestion Lambda
-    ↓
+ ↓
 DynamoDB
-    ↓
+ ↓
 DynamoDB Stream
-    ↓
+ ↓
 Stream Processor Lambda
-    ↓
-CloudWatch Logs
+ ↓
+SNS
+ ↓
+SQS
 ```
 
-## 1. Local Unit Tests
+CloudWatch Logs provide runtime evidence.
 
-Run from the repository root:
+## 1. Automated Tests
 
-```powershell
-python -m pytest application/tests
+Command:
+
+``` powershell
+python -m pytest application/tests -v
 ```
 
-Observed baseline result:
+Final result:
 
-```text
-1 passed
+``` text
+33 passed in 0.80s
 ```
 
-This confirms the local application test passes before deployment.
+The suite covers ingestion behavior, severity validation, required
+fields, stream INSERT/MODIFY/REMOVE handling, DynamoDB deserialization,
+notification behavior, priority routing, SNS configuration, and empty
+batches.
 
-## 2. Terraform Validation
+## 2. Terraform
 
-From the Terraform directory:
+The final infrastructure was successfully validated and applied:
 
-```powershell
-cd terraform
+``` powershell
 terraform validate
 terraform plan
+terraform apply
 ```
 
-Terraform validation completed successfully and the deployed environment was subsequently applied.
+Terraform subsequently reported no unexpected infrastructure drift.
 
-## 3. Deployed Resources
+## 3. API Validation
 
-Validated development resources include:
+A real request for `RIG-006` was submitted:
 
-```text
-API Gateway:
-https://57gu5fmekc.execute-api.eu-west-1.amazonaws.com
+``` json
+{
+  "site_id": "RIG-006",
+  "event_type": "connectivity_degradation",
+  "severity": "high",
+  "message": "LEO connectivity latency exceeded operational threshold"
+}
+```
 
-DynamoDB:
+The API returned a generated event ID and:
+
+``` text
+status = created
+```
+
+## 4. DynamoDB Persistence
+
+The event was confirmed in:
+
+``` text
 fieldops-serverless-dev-events
-
-Ingestion Lambda:
-fieldops-serverless-dev-event-handler
-
-Stream Processor Lambda:
-fieldops-serverless-dev-stream-processor
 ```
 
-The DynamoDB Stream ARN was also successfully returned by Terraform and AWS CLI.
+The stored event contains:
 
-## 4. API Functional Validation
-
-A valid event was submitted:
-
-```json
-{
-  "event_type": "equipment_alert",
-  "site_id": "RIG-003",
-  "severity": "medium",
-  "message": "Equipment telemetry alert detected"
-}
-```
-
-The API returned:
-
-```text
-HTTP/1.1 201 Created
-```
-
-The response contained a generated UUID and:
-
-```json
-{
-  "status": "created"
-}
-```
-
-This confirms successful API Gateway → ingestion Lambda execution.
-
-## 5. DynamoDB Persistence Validation
-
-The table was checked with:
-
-```powershell
-aws dynamodb scan `
-  --table-name fieldops-serverless-dev-events `
-  --region eu-west-1
-```
-
-Multiple operational events were confirmed in DynamoDB, including:
-
-- `connectivity_degradation`
-- `equipment_alert`
-
-The validated records included multiple rig/site identifiers.
-
-This confirms successful persistence after API ingestion.
-
-## 6. Input Validation
-
-A request without `site_id` was submitted.
-
-The application returned a Pydantic validation error:
-
-```text
-1 validation error for OperationalEvent
+``` text
+event_id
 site_id
-Field required
+event_type
+severity
+message
+timestamp
 ```
 
-The DynamoDB record count remained unchanged.
+## 5. Input Validation
 
-This confirms that invalid input is rejected before persistence.
+Automated tests confirm that missing required fields and invalid
+severity values are rejected before persistence.
 
-## 7. DynamoDB Stream Validation
+## 6. DynamoDB Streams
 
-The table configuration was checked:
+Observed configuration:
 
-```powershell
-aws dynamodb describe-table `
-  --table-name fieldops-serverless-dev-events `
-  --region eu-west-1 `
-  --query "Table.StreamSpecification"
-```
-
-Observed:
-
-```json
+``` json
 {
     "StreamEnabled": true,
     "StreamViewType": "NEW_AND_OLD_IMAGES"
 }
 ```
 
-The stream ARN was also confirmed with:
+This confirms the change-data-capture layer.
 
-```powershell
-aws dynamodb describe-table `
-  --table-name fieldops-serverless-dev-events `
-  --region eu-west-1 `
-  --query "Table.LatestStreamArn"
-```
+## 7. Stream Processor
 
-This confirms that DynamoDB changes are available to downstream consumers.
+CloudWatch showed:
 
-## 8. Stream Processor Validation
-
-CloudWatch Logs were inspected:
-
-```powershell
-aws logs tail `
-  "/aws/lambda/fieldops-serverless-dev-stream-processor" `
-  --region eu-west-1 `
-  --since 5m
-```
-
-Observed:
-
-```text
+``` text
 Stream processor started. Records received: 1
 Processing DynamoDB Stream event: INSERT
 New operational event: {...}
-Stream processor completed. Processed records: 1
+Operational event notification published to SNS. MessageId: ...
+Stream processor completed. Processed records: 1, Skipped records: 0
 ```
 
-This is direct evidence that:
+This proves that DynamoDB changes asynchronously invoked the stream
+processor and that a high-severity event was routed to SNS.
 
-1. A DynamoDB item was inserted.
-2. DynamoDB Streams captured the change.
-3. The stream event source mapping invoked the stream processor Lambda.
-4. The processor received an `INSERT`.
-5. The processor processed the record successfully.
+## 8. SNS Validation
 
-## 9. End-to-End Result
+The deployed topic is:
 
-The validated path is:
+``` text
+fieldops-serverless-dev-operational-alerts
+```
 
-```text
-HTTP Client
-    |
-    v
-API Gateway
-    |
-    v
-Ingestion Lambda
-    |
-    v
+The topic has an SQS subscription.
+
+Validation:
+
+``` powershell
+aws sns list-subscriptions-by-topic `
+  --topic-arn "$(terraform output -raw sns_topic_arn)" `
+  --region eu-west-1
+```
+
+Observed protocol:
+
+``` text
+sqs
+```
+
+## 9. SQS Validation
+
+The queue is:
+
+``` text
+fieldops-serverless-dev-operational-alerts
+```
+
+A message was successfully retrieved with:
+
+``` powershell
+aws sqs receive-message `
+  --queue-url "$(terraform output -raw sqs_queue_url)" `
+  --region eu-west-1 `
+  --max-number-of-messages 10 `
+  --wait-time-seconds 5
+```
+
+The message contained the SNS envelope and the operational event,
+including the `RIG-006` high-severity connectivity event.
+
+Therefore the alert path was validated end-to-end:
+
+``` text
 DynamoDB
-    |
-    v
-DynamoDB Stream
-    |
-    v
-Stream Processor Lambda
-    |
-    v
-CloudWatch Logs
+ ↓
+Stream
+ ↓
+Lambda
+ ↓
+SNS
+ ↓
+SQS
 ```
 
-## 10. Validation Evidence Summary
+## 10. Severity Routing
 
-| Test | Result |
-|---|---|
-| Python unit tests | PASS |
-| Terraform validation | PASS |
-| Terraform deployment | PASS |
-| Valid API request | PASS |
-| HTTP 201 response | PASS |
-| DynamoDB persistence | PASS |
-| Invalid `site_id` rejected | PASS |
-| DynamoDB Streams enabled | PASS |
-| Stream `INSERT` received | PASS |
-| Stream processor executed | PASS |
-| CloudWatch processing logs | PASS |
+  Severity     Processed   Priority SNS Notification
+  ---------- ----------- ---------------------------
+  low                Yes                          No
+  medium             Yes                          No
+  high               Yes                         Yes
+  critical           Yes                         Yes
 
-## 11. Near-Real-Time Validation
+## 11. Evidence Summary
 
-The observed stream processor invocation occurred shortly after the DynamoDB insertion.
+  Validation                      Result
+  ------------------------------- --------
+  33 Python tests                 PASS
+  Terraform validate              PASS
+  Terraform plan                  PASS
+  Terraform apply                 PASS
+  API invocation                  PASS
+  Event creation                  PASS
+  DynamoDB persistence            PASS
+  Input validation                PASS
+  DynamoDB Streams                PASS
+  Stream processor                PASS
+  High-severity SNS publication   PASS
+  SNS → SQS subscription          PASS
+  SQS delivery                    PASS
+  CloudWatch logs                 PASS
 
-This demonstrates the architecture's **near-real-time asynchronous processing capability**.
+## 12. Near-Real-Time Capability
 
-It should not be described as a high-throughput streaming system equivalent to Kafka or Kinesis. The current implementation demonstrates event-driven processing using DynamoDB Streams and Lambda.
+The stream processor executed shortly after the DynamoDB insertion.
 
-## 12. Runtime Observability
+This demonstrates **near-real-time asynchronous event processing**.
 
-The following CloudWatch log groups are relevant:
+The platform should not be described as a Kafka/Kinesis-equivalent
+high-throughput streaming platform.
 
-```text
+## 13. Observability Baseline
+
+Current observability is CloudWatch logging:
+
+``` text
 /aws/lambda/fieldops-serverless-dev-event-handler
 /aws/lambda/fieldops-serverless-dev-stream-processor
 ```
 
-Useful commands:
+Dedicated metrics, alarms, dashboards, structured logs, correlation IDs,
+and tracing are intentionally deferred.
 
-```powershell
-aws logs tail `
-  "/aws/lambda/fieldops-serverless-dev-event-handler" `
-  --region eu-west-1 `
-  --since 10m
+## 14. Baseline Limitations
+
+Not yet implemented or validated:
+
+-   API authentication/authorization
+-   API throttling
+-   Idempotency
+-   Retry/backoff strategy
+-   Partial batch failure handling
+-   Dead-letter/redrive handling
+-   SQS consumer
+-   CloudWatch alarms
+-   Dashboards
+-   Distributed tracing
+-   CI/CD
+-   Security scanning
+-   Multi-environment promotion
+-   Load testing
+-   High-throughput streaming
+
+## 15. Completion Decision
+
+The core architectural objective is complete.
+
+The project now demonstrates:
+
+``` text
+Architecture
+ ↓
+Implementation
+ ↓
+Infrastructure as Code
+ ↓
+Testing
+ ↓
+Deployment
+ ↓
+Troubleshooting
+ ↓
+End-to-End Validation
+ ↓
+Asynchronous Alert Delivery
 ```
 
-```powershell
-aws logs tail `
-  "/aws/lambda/fieldops-serverless-dev-stream-processor" `
-  --region eu-west-1 `
-  --since 10m
-```
+This is sufficient as a Solutions Architect portfolio baseline.
 
-## 13. Baseline Limitations
-
-The current implementation is a strong portfolio baseline, but it is not yet production-hardened.
-
-Not yet validated:
-
-- API authentication and authorization.
-- API throttling.
-- Retry and backoff behavior.
-- Dead-letter handling.
-- Idempotent stream processing.
-- Partial batch failure handling.
-- CloudWatch alarms.
-- Distributed tracing.
-- CI/CD.
-- Automated security scanning.
-- Multi-environment deployment.
-- Load/performance testing.
-- High-throughput streaming behavior.
-
-These are deliberate future enhancement areas rather than gaps in the validated baseline.
-
-## 14. Recommended Next Validation Stage
-
-The next maturity step should focus on production engineering rather than adding unrelated services:
-
-1. Implement idempotency.
-2. Add retry/error handling.
-3. Configure partial batch failure handling.
-4. Add CloudWatch alarms and metrics.
-5. Add API authentication.
-6. Add CI/CD.
-7. Add security scanning.
-8. Add integration tests.
-9. Perform controlled load testing.
+Observability and production hardening can be revisited later. The
+recommended next step is to move to Project 3 and avoid adding
+complexity to this baseline unless a specific requirement justifies it.
