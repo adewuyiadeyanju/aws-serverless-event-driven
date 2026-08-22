@@ -4,32 +4,35 @@
 
 This project is deployed as an AWS serverless, event-driven application using Terraform.
 
-The deployment provisions:
+The current development environment is deployed in:
+
+```text
+eu-west-1
+```
+
+Terraform provisions the validated baseline:
 
 - Amazon API Gateway HTTP API
-- AWS Lambda operational event handler
-- Amazon DynamoDB operational events table
+- Operational event ingestion Lambda
+- DynamoDB operational events table
 - DynamoDB Streams
-- AWS Lambda stream processor
-- IAM execution roles and policies
+- Stream processor Lambda
+- IAM roles and policies
 - CloudWatch logging
-- Supporting Terraform configuration
+- Supporting Terraform resources
 
-The AWS region used for the development environment is `eu-west-1`.
-
----
+Some Terraform files such as `eventbridge.tf` and `s3.tf` exist as part of the project structure, but the currently validated end-to-end runtime path is API Gateway → Lambda → DynamoDB → DynamoDB Streams → Lambda → CloudWatch.
 
 ## Prerequisites
 
-Ensure the following are installed and configured locally:
+Install:
 
 - Python 3.12
 - AWS CLI
 - Terraform
 - Git
-- A configured AWS identity with permission to provision the required resources
 
-Verify the tools:
+Verify:
 
 ```powershell
 python --version
@@ -38,13 +41,13 @@ terraform version
 git --version
 ```
 
-Verify the AWS identity:
+Verify AWS credentials:
 
 ```powershell
 aws sts get-caller-identity
 ```
 
----
+The AWS identity must have sufficient permissions to provision the required development resources.
 
 ## 1. Clone the Repository
 
@@ -53,61 +56,51 @@ git clone <repository-url>
 cd aws-serverless-event-driven
 ```
 
----
-
 ## 2. Create the Python Virtual Environment
-
-Create the project virtual environment:
 
 ```powershell
 python -m venv .venv
 ```
 
-Activate it on Windows PowerShell:
+Activate it in Windows PowerShell:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-The shell should show:
+Confirm the prompt shows:
 
 ```text
 (.venv)
 ```
 
-Install the development dependencies required by the project.
-
----
+Install the project's development dependencies according to the repository dependency configuration.
 
 ## 3. Run Unit Tests
 
-Run the application tests before deploying:
+Run:
 
 ```powershell
-python -m pytest application	ests
+python -m pytest application/tests
 ```
 
-The baseline implementation was validated with:
+The validated baseline produced:
 
 ```text
 1 passed
 ```
 
-Do not proceed with deployment if the application test suite is failing.
+Do not deploy while the test suite is failing.
 
----
+## 4. Build the Lambda Deployment Package
 
-## 4. Build the Lambda Package
-
-The Lambda deployment package is assembled under:
+The Terraform configuration packages:
 
 ```text
 application/build/
 ```
 
-The package contains the Lambda handler, models, and required Python dependencies.
-
-The Terraform configuration packages this directory using the `archive_file` data source:
+using the `archive_file` data source:
 
 ```hcl
 data "archive_file" "lambda_package" {
@@ -117,83 +110,82 @@ data "archive_file" "lambda_package" {
 }
 ```
 
-The generated ZIP file is a deployment artifact and should not normally be committed to Git.
+The build directory must contain Lambda-compatible dependencies, including the Pydantic runtime dependencies.
 
----
+### Important
+
+The local development environment is Windows, while AWS Lambda runs on Linux.
+
+Compiled dependencies such as `pydantic_core` must therefore be built for a Lambda-compatible Linux/Python environment.
+
+A Windows-built package can produce errors such as:
+
+```text
+No module named 'pydantic_core._pydantic_core'
+```
+
+The deployment artifact `lambda_package.zip` should normally remain untracked.
 
 ## 5. Initialize Terraform
 
-Change to the Terraform directory:
-
 ```powershell
 cd terraform
-```
-
-Initialize Terraform:
-
-```powershell
 terraform init
 ```
 
-This downloads the required providers and initializes the Terraform working directory.
-
----
-
 ## 6. Validate Terraform
-
-Run:
 
 ```powershell
 terraform validate
 ```
 
-Expected result:
+Expected:
 
 ```text
 Success! The configuration is valid.
 ```
 
----
-
-## 7. Review the Deployment Plan
-
-Run:
+## 7. Review the Terraform Plan
 
 ```powershell
 terraform plan
 ```
 
-Review the resources carefully before applying.
+Review the proposed changes and confirm there are no unexpected destructive actions.
 
-The plan should show the serverless infrastructure being created or updated without unexpected destructive changes.
-
----
-
-## 8. Deploy the Infrastructure
-
-Apply the configuration:
+## 8. Deploy
 
 ```powershell
 terraform apply
 ```
 
-Review the proposed changes and enter:
+Review the plan and enter:
 
 ```text
 yes
 ```
 
-Terraform will provision the infrastructure.
+Terraform will provision or update the development infrastructure.
 
-The project exposes outputs including:
+## 9. Review Outputs
 
-- API endpoint
-- DynamoDB table name
-- DynamoDB Stream ARN
-- Operational Lambda ARN
-- Stream processor Lambda ARN
+```powershell
+terraform output
+```
 
-Example outputs from the development environment:
+Relevant outputs include:
+
+```text
+api_endpoint
+dynamodb_table_name
+dynamodb_stream_arn
+lambda_function_arn
+lambda_function_name
+stream_processor_lambda_arn
+stream_processor_lambda_name
+```
+
+The validated development environment used:
 
 ```text
 api_endpoint = "https://57gu5fmekc.execute-api.eu-west-1.amazonaws.com"
@@ -202,11 +194,7 @@ lambda_function_name = "fieldops-serverless-dev-event-handler"
 stream_processor_lambda_name = "fieldops-serverless-dev-stream-processor"
 ```
 
----
-
-## 9. Validate DynamoDB Streams
-
-Confirm that the DynamoDB table has Streams enabled:
+## 10. Validate DynamoDB Streams
 
 ```powershell
 aws dynamodb describe-table `
@@ -224,7 +212,7 @@ Expected:
 }
 ```
 
-Retrieve the stream ARN:
+Retrieve the ARN:
 
 ```powershell
 aws dynamodb describe-table `
@@ -233,11 +221,9 @@ aws dynamodb describe-table `
   --query "Table.LatestStreamArn"
 ```
 
----
+## 11. Test the API
 
-## 10. Test the API
-
-Use PowerShell to construct the request body:
+Use PowerShell:
 
 ```powershell
 $body = @{
@@ -248,7 +234,7 @@ $body = @{
 } | ConvertTo-Json
 ```
 
-Send the request:
+Then:
 
 ```powershell
 Invoke-RestMethod `
@@ -258,7 +244,7 @@ Invoke-RestMethod `
   -Body $body
 ```
 
-Expected response:
+Expected:
 
 ```text
 event_id                             status
@@ -266,11 +252,7 @@ event_id                             status
 <uuid>                               created
 ```
 
----
-
-## 11. Validate the DynamoDB Record
-
-Query the table:
+## 12. Validate Persistence
 
 ```powershell
 aws dynamodb scan `
@@ -280,13 +262,11 @@ aws dynamodb scan `
 
 The newly submitted event should appear in the table.
 
----
+## 13. Validate Stream Processing
 
-## 12. Validate Stream Processing
+The stream processor is triggered asynchronously after a DynamoDB `INSERT`.
 
-The stream processor is triggered by DynamoDB Streams when a new event is inserted.
-
-View recent logs:
+View logs:
 
 ```powershell
 aws logs tail `
@@ -295,7 +275,7 @@ aws logs tail `
   --since 5m
 ```
 
-A successful invocation should contain messages similar to:
+A successful invocation should contain:
 
 ```text
 Stream processor started. Records received: 1
@@ -304,7 +284,7 @@ New operational event: ...
 Stream processor completed. Processed records: 1
 ```
 
-This validates the end-to-end flow:
+## 14. End-to-End Validation Path
 
 ```text
 HTTP Request
@@ -328,53 +308,33 @@ Stream Processor Lambda
 CloudWatch Logs
 ```
 
----
-
-## 13. Terraform Outputs
-
-At any time, retrieve the deployed outputs with:
-
-```powershell
-terraform output
-```
-
-For an individual output:
-
-```powershell
-terraform output api_endpoint
-terraform output dynamodb_table_name
-terraform output lambda_function_name
-terraform output stream_processor_lambda_name
-```
-
----
-
-## 14. Updating the Application
+## 15. Updating the Application
 
 When application code changes:
 
 1. Run unit tests.
 2. Rebuild `application/build`.
 3. Run `terraform plan`.
-4. Review the Lambda source hash and infrastructure changes.
+4. Confirm the Lambda source hash changes when expected.
 5. Run `terraform apply`.
 6. Invoke the API.
 7. Validate DynamoDB.
-8. Validate stream processor CloudWatch logs.
-9. Commit the tested changes.
+8. Validate stream processing.
+9. Review CloudWatch logs.
+10. Commit the tested change.
 
 Example:
 
 ```powershell
-python -m pytest application	ests
+cd ..
+python -m pytest application/tests
+
 cd terraform
 terraform plan
 terraform apply
 ```
 
----
-
-## 15. Destroying the Development Environment
+## 16. Destroy Development Resources
 
 For a disposable development environment:
 
@@ -382,24 +342,20 @@ For a disposable development environment:
 terraform destroy
 ```
 
-Review the resources Terraform proposes to remove before confirming.
+Review the resources carefully before confirming.
 
-Do not run `terraform destroy` against a shared or production environment without an explicit change-management decision.
-
----
+Never run `terraform destroy` against shared or production infrastructure without an explicit change-management decision.
 
 ## Deployment Principle
 
-The project uses Infrastructure as Code so that the complete serverless architecture can be reproduced consistently rather than relying on manually configured AWS resources.
-
-The deployment workflow is therefore:
+The deployment workflow is:
 
 ```text
 Code
   ↓
 Unit Tests
   ↓
-Build
+Build Lambda Dependencies
   ↓
 Terraform Validate
   ↓
@@ -411,7 +367,11 @@ API Validation
   ↓
 DynamoDB Validation
   ↓
-Stream Processing Validation
+DynamoDB Stream Validation
+  ↓
+Stream Processor Validation
   ↓
 CloudWatch Validation
 ```
+
+The objective is reproducible Infrastructure as Code rather than manually configured AWS resources.

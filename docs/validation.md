@@ -2,14 +2,30 @@
 
 ## Objective
 
-This document records validation of the deployed AWS Serverless Event-Driven Operational Events Platform.
+This document records the validation evidence for the deployed AWS Serverless Event-Driven Operational Events Platform.
 
-## Local Tests
+The goal is to demonstrate the complete baseline path:
 
-Run:
+```text
+API Gateway
+    ↓
+Ingestion Lambda
+    ↓
+DynamoDB
+    ↓
+DynamoDB Stream
+    ↓
+Stream Processor Lambda
+    ↓
+CloudWatch Logs
+```
+
+## 1. Local Unit Tests
+
+Run from the repository root:
 
 ```powershell
-python -m pytest application	ests
+python -m pytest application/tests
 ```
 
 Observed baseline result:
@@ -18,48 +34,43 @@ Observed baseline result:
 1 passed
 ```
 
-## Terraform
+This confirms the local application test passes before deployment.
 
-Run:
+## 2. Terraform Validation
+
+From the Terraform directory:
 
 ```powershell
 cd terraform
 terraform validate
 terraform plan
-terraform apply
 ```
 
-Terraform deployment completed successfully.
+Terraform validation completed successfully and the deployed environment was subsequently applied.
 
-## Deployed Resources
+## 3. Deployed Resources
 
-API endpoint:
+Validated development resources include:
 
 ```text
+API Gateway:
 https://57gu5fmekc.execute-api.eu-west-1.amazonaws.com
-```
 
-DynamoDB table:
-
-```text
+DynamoDB:
 fieldops-serverless-dev-events
-```
 
 Ingestion Lambda:
-
-```text
 fieldops-serverless-dev-event-handler
-```
 
-Stream processor Lambda:
-
-```text
+Stream Processor Lambda:
 fieldops-serverless-dev-stream-processor
 ```
 
-## API Validation
+The DynamoDB Stream ARN was also successfully returned by Terraform and AWS CLI.
 
-A valid request such as:
+## 4. API Functional Validation
+
+A valid event was submitted:
 
 ```json
 {
@@ -70,17 +81,25 @@ A valid request such as:
 }
 ```
 
-returned:
+The API returned:
 
 ```text
 HTTP/1.1 201 Created
 ```
 
-The response included a generated event ID and `created` status.
+The response contained a generated UUID and:
 
-## Persistence Validation
+```json
+{
+  "status": "created"
+}
+```
 
-Events were confirmed using:
+This confirms successful API Gateway → ingestion Lambda execution.
+
+## 5. DynamoDB Persistence Validation
+
+The table was checked with:
 
 ```powershell
 aws dynamodb scan `
@@ -88,11 +107,20 @@ aws dynamodb scan `
   --region eu-west-1
 ```
 
-The table contained successfully persisted events for multiple sites, including connectivity degradation and equipment alert events.
+Multiple operational events were confirmed in DynamoDB, including:
 
-## Input Validation
+- `connectivity_degradation`
+- `equipment_alert`
 
-A request without `site_id` was rejected with a Pydantic validation error:
+The validated records included multiple rig/site identifiers.
+
+This confirms successful persistence after API ingestion.
+
+## 6. Input Validation
+
+A request without `site_id` was submitted.
+
+The application returned a Pydantic validation error:
 
 ```text
 1 validation error for OperationalEvent
@@ -100,13 +128,13 @@ site_id
 Field required
 ```
 
-The DynamoDB count remained unchanged after the invalid request.
+The DynamoDB record count remained unchanged.
 
-This demonstrates validation before persistence.
+This confirms that invalid input is rejected before persistence.
 
-## DynamoDB Streams
+## 7. DynamoDB Stream Validation
 
-Verify the stream with:
+The table configuration was checked:
 
 ```powershell
 aws dynamodb describe-table `
@@ -124,9 +152,20 @@ Observed:
 }
 ```
 
-## Stream Processor Validation
+The stream ARN was also confirmed with:
 
-CloudWatch Logs were checked using:
+```powershell
+aws dynamodb describe-table `
+  --table-name fieldops-serverless-dev-events `
+  --region eu-west-1 `
+  --query "Table.LatestStreamArn"
+```
+
+This confirms that DynamoDB changes are available to downstream consumers.
+
+## 8. Stream Processor Validation
+
+CloudWatch Logs were inspected:
 
 ```powershell
 aws logs tail `
@@ -144,24 +183,17 @@ New operational event: {...}
 Stream processor completed. Processed records: 1
 ```
 
-This confirms:
+This is direct evidence that:
 
-```text
-DynamoDB INSERT
-      |
-      v
-DynamoDB Stream
-      |
-      v
-Stream Processor Lambda
-      |
-      v
-CloudWatch Logs
-```
+1. A DynamoDB item was inserted.
+2. DynamoDB Streams captured the change.
+3. The stream event source mapping invoked the stream processor Lambda.
+4. The processor received an `INSERT`.
+5. The processor processed the record successfully.
 
-## End-to-End Result
+## 9. End-to-End Result
 
-The following path has been successfully demonstrated:
+The validated path is:
 
 ```text
 HTTP Client
@@ -185,33 +217,87 @@ Stream Processor Lambda
 CloudWatch Logs
 ```
 
-## Evidence
+## 10. Validation Evidence Summary
 
-Validation evidence includes:
+| Test | Result |
+|---|---|
+| Python unit tests | PASS |
+| Terraform validation | PASS |
+| Terraform deployment | PASS |
+| Valid API request | PASS |
+| HTTP 201 response | PASS |
+| DynamoDB persistence | PASS |
+| Invalid `site_id` rejected | PASS |
+| DynamoDB Streams enabled | PASS |
+| Stream `INSERT` received | PASS |
+| Stream processor executed | PASS |
+| CloudWatch processing logs | PASS |
 
-- Passing Python unit tests.
-- Successful Terraform deployment.
-- Successful API invocation.
-- Successful request validation.
-- Successful DynamoDB persistence.
-- Enabled DynamoDB Streams.
-- Successful stream-triggered Lambda invocation.
-- CloudWatch processing logs.
+## 11. Near-Real-Time Validation
 
-## Baseline Limitations
+The observed stream processor invocation occurred shortly after the DynamoDB insertion.
 
-The current implementation is a portfolio baseline rather than a production-hardened platform.
+This demonstrates the architecture's **near-real-time asynchronous processing capability**.
 
-Future validation should cover:
+It should not be described as a high-throughput streaming system equivalent to Kafka or Kinesis. The current implementation demonstrates event-driven processing using DynamoDB Streams and Lambda.
 
-- Authentication and authorization.
+## 12. Runtime Observability
+
+The following CloudWatch log groups are relevant:
+
+```text
+/aws/lambda/fieldops-serverless-dev-event-handler
+/aws/lambda/fieldops-serverless-dev-stream-processor
+```
+
+Useful commands:
+
+```powershell
+aws logs tail `
+  "/aws/lambda/fieldops-serverless-dev-event-handler" `
+  --region eu-west-1 `
+  --since 10m
+```
+
+```powershell
+aws logs tail `
+  "/aws/lambda/fieldops-serverless-dev-stream-processor" `
+  --region eu-west-1 `
+  --since 10m
+```
+
+## 13. Baseline Limitations
+
+The current implementation is a strong portfolio baseline, but it is not yet production-hardened.
+
+Not yet validated:
+
+- API authentication and authorization.
 - API throttling.
-- Retry behavior.
-- Dead-letter destinations.
-- Idempotent processing.
+- Retry and backoff behavior.
+- Dead-letter handling.
+- Idempotent stream processing.
 - Partial batch failure handling.
 - CloudWatch alarms.
 - Distributed tracing.
 - CI/CD.
-- Security scanning.
+- Automated security scanning.
 - Multi-environment deployment.
+- Load/performance testing.
+- High-throughput streaming behavior.
+
+These are deliberate future enhancement areas rather than gaps in the validated baseline.
+
+## 14. Recommended Next Validation Stage
+
+The next maturity step should focus on production engineering rather than adding unrelated services:
+
+1. Implement idempotency.
+2. Add retry/error handling.
+3. Configure partial batch failure handling.
+4. Add CloudWatch alarms and metrics.
+5. Add API authentication.
+6. Add CI/CD.
+7. Add security scanning.
+8. Add integration tests.
+9. Perform controlled load testing.
