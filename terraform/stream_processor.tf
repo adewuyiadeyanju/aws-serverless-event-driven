@@ -24,6 +24,7 @@ resource "aws_lambda_function" "stream_processor" {
   environment {
     variables = {
       PROCESSOR_NAME = "${var.project_name}-${var.environment}-stream-processor"
+      SNS_TOPIC_ARN  = aws_sns_topic.operational_alerts.arn
     }
   }
 

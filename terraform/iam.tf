@@ -115,6 +115,16 @@ resource "aws_iam_role_policy" "stream_processor" {
         ]
 
         Resource = aws_dynamodb_table.operational_events.stream_arn
+      },
+
+      {
+        Effect = "Allow"
+
+        Action = [
+          "sns:Publish"
+        ]
+
+        Resource = aws_sns_topic.operational_alerts.arn
       }
     ]
   })
