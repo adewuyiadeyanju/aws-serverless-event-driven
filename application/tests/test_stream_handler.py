@@ -10,7 +10,7 @@ sys.path.insert(
     str(Path(__file__).resolve().parents[1] / "src"),
 )
 
-import stream_handler
+import test_stream_handler
 
 
 # ---------------------------------------------------------------------------
