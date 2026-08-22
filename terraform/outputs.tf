@@ -32,3 +32,23 @@ output "stream_processor_lambda_name" {
   description = "Name of the DynamoDB stream processor Lambda"
   value       = aws_lambda_function.stream_processor.function_name
 }
+
+output "sqs_queue_name" {
+  description = "Operational alerts SQS queue name"
+  value       = aws_sqs_queue.operational_alerts.name
+}
+
+output "sqs_queue_url" {
+  description = "Operational alerts SQS queue URL"
+  value       = aws_sqs_queue.operational_alerts.url
+}
+
+output "sqs_queue_arn" {
+  description = "Operational alerts SQS queue ARN"
+  value       = aws_sqs_queue.operational_alerts.arn
+}
+
+output "sns_topic_arn" {
+  description = "Operational alerts SNS topic ARN"
+  value       = aws_sns_topic.operational_alerts.arn
+}
